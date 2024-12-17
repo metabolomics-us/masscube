@@ -1,12 +1,11 @@
 # A module for statistical analysis
-
 # imports
+import umap.umap_ as umap
 
 import numpy as np
 import os
 from scipy.stats import ttest_ind, f_oneway
 from sklearn.decomposition import PCA
-from umap import UMAP
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import random
@@ -30,10 +29,10 @@ def full_statistical_analysis(feature_table, params, include_qc=False):
     -------
     feature_table : pandas DataFrame
     """
-    
+
     # UMAP analysis
     umap_analysis(feature_table, params)
-    
+
     return feature_table
 
 
@@ -59,7 +58,7 @@ def t_test(data_array, individual_sample_groups):
     if len(sample_groups) != 2:
         print("The number of sample groups is not equal to 2.")
         return None
-    
+
     v1 = individual_sample_groups == sample_groups[0]
     v2 = individual_sample_groups == sample_groups[1]
 
@@ -69,7 +68,7 @@ def t_test(data_array, individual_sample_groups):
             p_values.append(1)
         else:
             p_values.append(ttest_ind(data_array[i, v1], data_array[i, v2]).pvalue)
-    
+
     # adjusted_p_values = false_discovery_control(p_values)
 
     return p_values
@@ -97,19 +96,20 @@ def anova(data_array, individual_sample_groups):
     if len(sample_groups) < 2:
         print("The number of sample groups is less than 2.")
         return None
-    
+
     for i in range(len(data_array)):
         if np.all(data_array[i] == data_array[i, 0]):
             p_values.append(1)
         else:
             p_values.append(f_oneway(*[data_array[i, individual_sample_groups == g] for g in sample_groups]).pvalue)
-    
+
     # adjusted_p_values = false_discovery_control(p_values)
 
     return p_values
 
 
-def pca_analysis(data_array, individual_sample_groups, scaling=True, transformation=True, gapFillingRatio=0.2, output_dir=None, before_norm=False):
+def pca_analysis(data_array, individual_sample_groups, scaling=True, transformation=True, gapFillingRatio=0.2,
+                 output_dir=None, before_norm=False):
     """
     Principal component analysis (PCA) analysis.
 
@@ -137,7 +137,7 @@ def pca_analysis(data_array, individual_sample_groups, scaling=True, transformat
     # Gap-filling
     for i, vec in enumerate(X):
         if not np.all(vec):
-            X[i][vec == 0] = np.min(vec[vec!=0]) * gapFillingRatio
+            X[i][vec == 0] = np.min(vec[vec != 0]) * gapFillingRatio
 
     # transformation by log10
     if transformation:
@@ -146,14 +146,14 @@ def pca_analysis(data_array, individual_sample_groups, scaling=True, transformat
     # scaling
     if scaling:
         X = (X - np.mean(X, axis=1).reshape(-1, 1)) / np.std(X, axis=1).reshape(-1, 1)
-    
+
     # PCA analysis
     X = X.transpose()
     pca = PCA(n_components=2)
     pca.fit(X)
     var_PC1, var_PC2 = pca.explained_variance_ratio_
-    vecPC1 = pca.transform(X)[:,0]
-    vecPC2 = pca.transform(X)[:,1]
+    vecPC1 = pca.transform(X)[:, 0]
+    vecPC2 = pca.transform(X)[:, 1]
 
     if output_dir is not None:
         if before_norm:
@@ -186,7 +186,7 @@ def umap_analysis(feature_table, params):
     if params.statistics_dir is None:
         print("No statistics directory. UMAP analysis is not performed.")
         return None
-    
+
     df = params.sample_metadata
     df = df[(~df['is_qc']) & (~df['is_blank'])]
     n = df.iloc[:, 0].values
@@ -196,11 +196,11 @@ def umap_analysis(feature_table, params):
     # UMAP analysis
     data_arr = data_arr.T
     data_arr = StandardScaler().fit_transform(data_arr)
-    
+
     # set random seed
     n_samples = data_arr.shape[0]
     n_neighbors = min(15, n_samples - 1)
-    reducer = UMAP(n_neighbors=n_neighbors, random_state=42, n_jobs=1)
+    reducer = umap.UMAP(n_neighbors=n_neighbors, random_state=42, n_jobs=1)
     embedding = reducer.fit_transform(data_arr)
 
     # by different metadata
@@ -210,9 +210,9 @@ def umap_analysis(feature_table, params):
         ug = list(set(g))
         colors = generate_random_color(len(ug))
         metadata_to_color = {ug[i]: colors[i] for i in range(len(ug))}
-        
+
         color_list = [metadata_to_color[i] for i in g]
-        
+
         # plot the UMAP
         plt.figure(figsize=(10, 10))
         plt.rcParams['font.size'] = 20
@@ -251,7 +251,7 @@ def generate_random_color(num):
 
     if num < 10:
         return COLORS[:num]
-    
+
     else:
         colors = [c for c in COLORS]
         for _ in range(num - 10):
