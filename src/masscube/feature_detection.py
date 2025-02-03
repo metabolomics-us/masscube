@@ -138,14 +138,14 @@ class Feature:
         self.rt_seq = self.rt_seq[first:last]
         self.scan_idx_seq = self.scan_idx_seq[first:last]
         
-        self.mz = np.mean(self.signals[:, 0])
         apx = np.argmax(self.signals[:, 1])
+        self.mz = self.signals[apx, 0]
         self.rt = self.rt_seq[apx]
         self.scan_idx = self.scan_idx_seq[apx]
         self.length = np.sum(self.signals[:, 1] > 0)
 
         if ph:
-            self.peak_height = self.signals[apx, 1]
+            self.peak_height = int(self.signals[apx, 1])
         if pa:
             self.peak_area = int(np.trapz(y=self.signals[:, 1], x=self.rt_seq) * 60)
         if ta:
@@ -189,12 +189,17 @@ Functions
 
 def detect_features(d):
     """
-    A function to detect features in the MS data.
+    Detect features in the MS data.
 
     Parameters
     ----------
     d: MSData object
         An MSData object that contains the MS data.
+
+    Returns
+    -------
+    final_features: list
+        A list of detected features.
     """
 
     # A list to store the rois in progress
@@ -214,6 +219,8 @@ def detect_features(d):
     for ms1_idx in d.ms1_idx[1:]:
 
         s = d.scans[ms1_idx]                                  # The current MS1 scan
+        if len(s.signals) == 0:
+            continue
         avlb_signals = np.ones(len(s.signals), dtype=bool)    # available signals to assign to features
         avlb_features = np.ones(len(features), dtype=bool)    # available features to take new signals
         to_be_moved = []                                      # features to be moved to final_features

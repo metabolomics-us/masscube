@@ -16,12 +16,12 @@ import time
 from .raw_data_utils import read_raw_file_to_obj
 from .params import Params
 from .feature_grouping import group_features_after_alignment, group_features_single_file
-from .alignment import feature_alignment, output_feature_table
+from .alignment import feature_alignment, output_feature_table, convert_features_to_df, output_feature_to_msp
 from .annotation import annotate_aligned_features, annotate_features, feature_annotation_mzrt
 from .normalization import sample_normalization, signal_normalization
 from .visualization import plot_ms2_matching_from_feature_table
 from .stats import full_statistical_analysis
-from .utils_functions import convert_signals_to_string, convert_features_to_df, output_feature_to_msp
+from .utils_functions import convert_signals_to_string
 
 
 # 1. Untargeted feature detection for a single file
@@ -56,57 +56,63 @@ def process_single_file(file_name, params=None, segment_feature=True, group_feat
         An MSData object containing the processed data.
     """
 
-    # STEP 1. data reading, parsing, and parameter preparation
-    d = read_raw_file_to_obj(file_name, params=params)
-    # check if the file is centroided
-    if not d.params.is_centroid:
-        print("File: " + file_name + " is not centroided and skipped.")
-        return None
-    # set ms2 library path
-    if ms2_library_path is not None:
-        d.params.ms2_library_path = ms2_library_path
-
-    # STEP 2. feature detection and segmentation
-    d.detect_features()
-    if segment_feature:
-        d.segment_features()
-
-    # STEP 3. feature evaluation
-    if evaluate_peak_shape:
-        d.summarize_features(cal_g_score=True, cal_a_score=True)
-    else:
-        d.summarize_features(cal_g_score=False, cal_a_score=False)
-
-    # STEP 4. MS2 annotation
-    if annotate_ms2:
-        if ms2_library_path is None:
-            ms2_library_path = d.params.ms2_library_path
+    try:
+        # STEP 1. data reading, parsing, and parameter preparation
+        d = read_raw_file_to_obj(file_name, params=params)
+        # check if the file is centroided
+        if not d.params.is_centroid:
+            print("File: " + file_name + " is not centroided and skipped.")
+            return None
+        # set ms2 library path
         if ms2_library_path is not None:
-            annotate_features(d=d, sim_tol=d.params.ms2_sim_tol, fuzzy_search=True, ms2_library_path=ms2_library_path)
+            d.params.ms2_library_path = ms2_library_path
 
-    # STEP 5. feature grouping
-    if group_features:
-        group_features_single_file(d)
+        # STEP 2. feature detection and segmentation
+        d.detect_features()
+        if segment_feature:
+            d.segment_features()
 
-    # STEP 6. Visualization and output
-    if d.params.plot_bpc and d.params.bpc_dir is not None:
-        d.plot_bpc(output_dir=os.path.join(d.params.bpc_dir, d.params.file_name + "_bpc.png"))
-    
-    if output_dir is not None:
-        d.output_single_file(os.path.join(output_dir, d.params.file_name + ".txt"))
-    
-    elif d.params.output_single_file and d.params.single_file_dir is not None:
-        d.output_single_file()
+        # STEP 3. feature evaluation
+        if evaluate_peak_shape:
+            d.summarize_features(cal_g_score=True, cal_a_score=True)
+        else:
+            d.summarize_features(cal_g_score=False, cal_a_score=False)
+
+        # STEP 4. MS2 annotation
+        if annotate_ms2:
+            if ms2_library_path is None:
+                ms2_library_path = d.params.ms2_library_path
+            if ms2_library_path is not None:
+                annotate_features(d=d, sim_tol=d.params.ms2_sim_tol, fuzzy_search=True, ms2_library_path=ms2_library_path)
+
+        # STEP 5. feature grouping
+        if group_features:
+            group_features_single_file(d)
+
+        # STEP 6. Visualization and output
+        if d.params.plot_bpc and d.params.bpc_dir is not None:
+            d.plot_bpc(output_dir=os.path.join(d.params.bpc_dir, d.params.file_name + "_bpc.png"))
         
-    # for faster data reloading
-    if d.params.tmp_file_dir is not None:
-        d.convert_to_mzpkl()
+        if output_dir is not None:
+            d.output_single_file(os.path.join(output_dir, d.params.file_name + ".txt"))
+        
+        elif d.params.output_single_file and d.params.single_file_dir is not None:
+            d.output_single_file()
+            
+        # for faster data reloading
+        if d.params.tmp_file_dir is not None:
+            d.convert_to_mzpkl()
 
-    return d
+        return d
+    
+    except:
+        print("Error occurred during processing file: " + file_name)
+        return None
 
 
 # 2. Untargeted metabolomics workflow
-def untargeted_metabolomics_workflow(path=None, return_results=False):
+def untargeted_metabolomics_workflow(path=None, return_results=False, only_process_single_files=False,
+                                     return_params_only=False):
     """
     The untargeted metabolomics workflow. See the documentation for details.
 
@@ -116,6 +122,10 @@ def untargeted_metabolomics_workflow(path=None, return_results=False):
         The working directory. If None, the current working directory is used.
     return_results : bool
         Whether to return the results. Default is False.
+    only_process_single_files : bool
+        Whether to only process the single files. Default is False.
+    return_params_only : bool
+        Whether to return the parameters only. Default is False.
 
     Returns
     -------
@@ -151,6 +161,9 @@ def untargeted_metabolomics_workflow(path=None, return_results=False):
     print("\tWorkflow is prepared.")
     print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
+    if return_params_only:
+        return params
+
     # STEP 2. Process individual files
     print("Step 2: Processing individual files for feature detection...")
     processed_files = [f.split(".")[0] for f in os.listdir(params.single_file_dir) if f.lower().endswith(".txt")]
@@ -166,7 +179,7 @@ def untargeted_metabolomics_workflow(path=None, return_results=False):
         if len(to_be_processed) - i < params.batch_size:
             print("\tProcessing files from " + str(i) + " to " + str(len(to_be_processed)))
         else:
-            print("\tProcessing files from " + str(i) + " to " + str(i+len(to_be_processed)))
+            print("\tProcessing files from " + str(i) + " to " + str(i+params.batch_size))
         p = multiprocessing.Pool(workers)
         p.starmap(process_single_file, [(f, params) for f in to_be_processed[i:i+params.batch_size]])
         p.close()
@@ -176,54 +189,60 @@ def untargeted_metabolomics_workflow(path=None, return_results=False):
     print("\tIndividual file processing is completed.")
     print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
     
+    if only_process_single_files:
+        return None
+    
     # STEP 3. Feature alignment
     print("Step 3: Aligning features...")
-    if os.path.exists(params.project_dir + "/aligned_feature_table.txt"):
-        if return_results:
-            return None, params
-        else:
-            return None
-    features = feature_alignment(params.single_file_dir, params)
-    metadata[3]["status"] = "completed"
-    print("\tFeature alignment is completed.")
-    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-    
-    # STEP 4. Feature annotation
-    print("Step 4: Annotating features...")
-    # annotation (using MS2 library)
-    print("\tAnnotating features using the MS2 library...")
-    if params.ms2_library_path is not None and os.path.exists(params.ms2_library_path):
-        features = annotate_aligned_features(features, params)
-        print("\tMS2 annotation is completed.")
-    else:
-        print("\tNo MS2 library is found. MS2 annotation is skipped.")
-    # annotation (using mzrt list)
-    if os.path.exists(os.path.join(params.project_dir, "mzrt_list.csv")):
-        print("\tAnnotating features using the extra mzrt list...")
-        features = feature_annotation_mzrt(features, os.path.join(params.project_dir, "mzrt_list.csv"), params.mz_tol_alignment, params.rt_tol_alignment)
-        print("\tmz/rt annotation is completed.")
-    # annotate feature groups
-    print("\tAnnotating feature groups...")
-    if params.group_features_after_alignment:
-        group_features_after_alignment(features, params)
-    for f in features:
-        f.isotope_signals = convert_signals_to_string(f.isotope_signals)
-    print("\tFeature grouping is completed.")
-    metadata[4]["status"] = "completed"
+    if not os.path.exists(params.project_dir + "/aligned_feature_table.txt"):
 
-    feature_table = convert_features_to_df(features=features, sample_names=params.sample_names, quant_method=params.quant_method)
-    # output feature table to a txt file
-    output_path = os.path.join(params.project_dir, "aligned_feature_table.txt")
-    output_feature_table(feature_table, output_path)
-    # output the acquired MS2 spectra to a MSP file (designed for MassWiki)
-    output_path = os.path.join(params.project_file_dir, "features.msp")
-    output_feature_to_msp(feature_table, output_path)
-    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        features = feature_alignment(params.single_file_dir, params)
+        metadata[3]["status"] = "completed"
+        print("\tFeature alignment is completed.")
+        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        
+    # STEP 4. Feature annotation
+        print("Step 4: Annotating features...")
+        # annotation (using MS2 library)
+        print("\tAnnotating features using the MS2 library...")
+        if params.ms2_library_path is not None and os.path.exists(params.ms2_library_path):
+            features = annotate_aligned_features(features, params)
+            print("\tMS2 annotation is completed.")
+        else:
+            print("\tNo MS2 library is found. MS2 annotation is skipped.")
+        # annotation (using mzrt list)
+        if os.path.exists(os.path.join(params.project_dir, "mzrt_list.csv")):
+            print("\tAnnotating features using the extra mzrt list...")
+            features = feature_annotation_mzrt(features, os.path.join(params.project_dir, "mzrt_list.csv"), params.mz_tol_alignment, params.rt_tol_alignment)
+            print("\tmz/rt annotation is completed.")
+        # annotate feature groups
+        print("\tAnnotating feature groups...")
+        if params.group_features_after_alignment:
+            group_features_after_alignment(features, params)
+        for f in features:
+            f.isotope_signals = convert_signals_to_string(f.isotope_signals)
+        print("\tFeature grouping is completed.")
+        metadata[4]["status"] = "completed"
+
+        feature_table = convert_features_to_df(features=features, sample_names=params.sample_names, quant_method=params.quant_method)
+        # output feature table to a txt file
+        output_path = os.path.join(params.project_dir, "aligned_feature_table.txt")
+        output_feature_table(feature_table, output_path)
+        # output the acquired MS2 spectra to a MSP file (designed for MassWiki)
+        output_path = os.path.join(params.project_file_dir, "features.msp")
+        output_feature_to_msp(feature_table, output_path)
+        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    else:
+        feature_table = pd.read_csv(params.project_dir + "/aligned_feature_table.txt", sep="\t", low_memory=False)
 
     # STEP 5. signal normalization
     if params.signal_normalization:
         print("Step 5: Running signal normalization...")
-        feature_table = signal_normalization(feature_table, params.sample_metadata, params.signal_norm_method)
+        print(params.plot_normalization)
+        if params.plot_normalization:
+            feature_table = signal_normalization(feature_table, params.sample_metadata, params.signal_norm_method, output_plot_path=params.normalization_dir)
+        else:
+            feature_table = signal_normalization(feature_table, params.sample_metadata, params.signal_norm_method)
         metadata[5]["status"] = "completed"
         print("\tMS signal drift normalization is completed.")
     else:
@@ -287,7 +306,7 @@ def run_evaluation(path=None, zscore_threshold=-2):
     path : str
         Path to the project directory.
     zscore_threshold : float
-        The threshold of z-score for detecting problematic files. Default is -2
+        The threshold of z-score for detecting problematic files. Default is -2.
     """
 
     if path is None:
@@ -306,19 +325,17 @@ def run_evaluation(path=None, zscore_threshold=-2):
     txt_path = os.path.join(path, "single_files")
     txt_files = [f for f in os.listdir(txt_path) if f.lower().endswith('.txt')]
     txt_files = [f for f in txt_files if not f.startswith(".")]
+    txt_files = [f for f in txt_files if f.split(".")[0] not in blank_samples]
+
     int_array = np.zeros(len(txt_files))
     for i in range(len(txt_files)):
         df = pd.read_csv(os.path.join(txt_path, txt_files[i]), sep="\t", low_memory=False)
-        int_array[i] = np.sum(df['peak_height'].values)
+        int_array[i] = np.max(df['peak_height'].values)
         
     z = zscore(int_array)
     idx = np.where(z < zscore_threshold)[0]
 
-    problematic_files = []
-    for i in idx:
-        problematic_files.append(txt_files[i].split(".")[0])
-
-    problematic_files = [f for f in problematic_files if f not in blank_samples]
+    problematic_files = [txt_files[i].split(".")[0] for i in idx]
     
     # output the names of problematic files
     if len(problematic_files) > 0:

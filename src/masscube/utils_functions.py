@@ -8,8 +8,7 @@ import os
 from tqdm import tqdm
 from datetime import datetime
 import re
-from pyteomics import mass
-from pyteomics.mass.mass import isotopologues, calculate_mass
+from collections import Counter
 
 
 def generate_sample_table(path=None, output=True):
@@ -124,71 +123,58 @@ def get_timestamps(path=None, output=True):
         return df
 
 
-# Note: this function is not used in the current version of the package
-def cal_ion_mass(formula, adduct, charge):
+def formula_to_mz(formula, adduct, charge):
     """
-    A function to calculate the ion mass of a given formula, adduct and charge.
+    Calculate the m/z value of a molecule given its chemical formula, adduct and charge.
 
     Parameters
     ----------
-    formula: str
-        The chemical formula of the ion.
-    adduct: str
-        Adduct of the ion.
-    charge: int
-        Charge of the ion. 
-        Use signs for specifying ion modes: +1 for positive mode and -1 for negative mode.
+    formula : str
+        Chemical formula of the molecule.
+    adduct : str
+        Adduct of the molecule. The first character should be '+' or '-'. In particular, 
+        for adduct like [M-H-H2O]-, use '-H3O' or '-H2OH'.
+    charge : int
+        Charge of the molecule. Positive for cations and negative for anions.
 
     Returns
     -------
-    ion_mass: float
-        The ion mass of the given formula, adduct and charge.
+    mz : float
+        The m/z value of the molecule.
+
+    Examples
+    --------
+    >>> formula_to_mz("C6H12O6", "+H", 1)
+    181.070665
+    >>> formula_to_mz("C9H14N3O8P", "-H2OH", -1)
+    304.034010
     """
 
-    # if there is a D in the formula, and not followed by a lowercase letter, replace it with H[2]
-    if 'D' in formula and not formula[formula.find('D') + 1].islower():
-        formula = formula.replace('D', 'H[2]')
+    mz = 0
 
-    # calculate the ion mass
-    final_formula = formula + adduct
-    ion_mass = (mass.calculate_mass(formula=final_formula) - charge * _ELECTRON_MASS) / abs(charge)
-    return ion_mass
+    # original molecule
+    formula_matches = re.findall(r'([A-Z][a-z]*)(\d*)', formula)
+    atom_counts = Counter()
+    for element, count in formula_matches:
+        atom_counts[element] += int(count) if count else 1
 
-_ELECTRON_MASS = 0.00054858
+    mz += sum(ATOM_MASSES[element] * count for element, count in atom_counts.items())
 
+    # adduct
+    adduct_matches = re.findall(r'([A-Z][a-z]*)(\d*)', adduct[1:])
+    adduct_counts = Counter()
+    for element, count in adduct_matches:
+        adduct_counts[element] += int(count) if count else 1
 
-# Note: this function is not used in the current version of the package
-def calculate_isotope_distribution(formula, mass_resolution=10000, intensity_threshold=0.001):
+    if adduct[0] == '+':
+        mz += sum(ATOM_MASSES[element] * count for element, count in adduct_counts.items())
+    elif adduct[0] == '-':
+        mz -= sum(ATOM_MASSES[element] * count for element, count in adduct_counts.items())
 
-    mass = []
-    abundance = []
+    # charge
+    mz = (mz - ELECTRON_MASS * charge) / abs(charge)
 
-    for i in isotopologues(formula, report_abundance=True, overall_threshold=intensity_threshold):
-        mass.append(calculate_mass(i[0]))
-        abundance.append(i[1])
-    mass = np.array(mass)
-    abundance = np.array(abundance)
-    order = np.argsort(mass)
-    mass = mass[order]
-    abundance = abundance[order]
-
-    mass_diffrence = mass[0] / mass_resolution
-    # merge mass with difference lower than mass_diffrence
-    groups = []
-    group = [0]
-    for i in range(1, len(mass)):
-        if mass[i] - mass[i-1] < mass_diffrence:
-            group.append(i)
-        else:
-            groups.append(group)
-            group = [i]
-    groups.append(group)
-
-    mass = [np.mean(mass[i]) for i in groups]
-    abundance = [np.sum(abundance[i]) for i in groups]
-    abundance = np.array(abundance) / np.max(abundance)
-
-    return mass, abundance
+    return mz
 
 
 def get_start_time(file_name):
@@ -263,91 +249,25 @@ def convert_signals_to_string(signals):
     return string
 
 
-def output_feature_to_msp(feature_table, output_path):
-    """
-    A function to output MS2 spectra to MSP format.
+ATOM_MASSES = {
+    'H': 1.00782503207,
+    'D': 2.01410177812,
+    'C': 12.0,
+    'N': 14.0030740052,
+    'O': 15.9949146221,
+    'F': 18.998403163,
+    'Na': 22.989769282,
+    'Mg': 23.985041697,
+    'P': 30.973761998,
+    'S': 31.97207069,
+    'Cl': 34.968852682,
+    'K': 38.96370649,
+    'Ca': 39.96259098,
+    'Fe': 55.93493633,
+    'Cu': 62.92959772,
+    'Zn': 63.92914201,
+    'Br': 78.9183376,
+    'I': 126.904473,
+}
 
-    Parameters
-    ----------
-    feature_table : pandas.DataFrame
-        A DataFrame containing MS2 spectra.
-    output_path : str
-        The path to the output MSP file.
-    """
-    
-    # check the output path to make sure it is a .msp file and it esists
-    if not output_path.lower().endswith(".msp"):
-        raise ValueError("The output path must be a .msp file.")
-
-    with open(output_path, "w") as f:
-        for i in range(len(feature_table)):
-            f.write("ID: " + str(feature_table['feature_ID'][i]) + "\n")
-            if feature_table['MS2'][i] is None or feature_table['MS2'][i]!=feature_table['MS2'][i]:
-                f.write("NAME: Unknown\n")
-                f.write("PRECURSORMZ: " + str(feature_table['m/z'][i]) + "\n")
-                f.write("PRECURSORTYPE: " + str(feature_table['adduct'][i]) + "\n")
-                f.write("RETENTIONTIME: " + str(feature_table['RT'][i]) + "\n")
-                f.write("Num Peaks: " + "0\n")
-                f.write("\n")
-                continue
-
-            if feature_table['annotation'][i] is None:
-                name = "Unknown"
-            else:
-                name = str(feature_table['annotation'][i])
-
-            peaks = re.findall(r"\d+\.\d+", feature_table['MS2'][i])
-            f.write("NAME: " + name + "\n")
-            f.write("PRECURSORMZ: " + str(feature_table['m/z'][i]) + "\n")
-            f.write("PRECURSORTYPE: " + str(feature_table['adduct'][i]) + "\n")
-            f.write("RETENTIONTIME: " + str(feature_table['RT'][i]) + "\n")
-            f.write("SEARCHMODE: " + str(feature_table['search_mode'][i]) + "\n")
-            f.write("FORMULA: " + str(feature_table['formula'][i]) + "\n")
-            f.write("INCHIKEY: " + str(feature_table['InChIKey'][i]) + "\n")
-            f.write("SMILES: " + str(feature_table['SMILES'][i]) + "\n")
-            f.write("Num Peaks: " + str(int(len(peaks)/2)) + "\n")
-            for j in range(len(peaks)//2):
-                f.write(str(peaks[2*j]) + "\t" + str(peaks[2*j+1]) + "\n")
-            f.write("\n")
-
-
-def convert_features_to_df(features, sample_names, quant_method="peak_height"):
-    """
-    convert feature list to DataFrame
-
-    Parameters
-    ----------
-    features : list
-        list of features
-    sample_names : list
-        list of sample names
-    quant_method : str
-        quantification method, "peak_height", "peak_area" or "top_average"
-
-    Returns
-    -------
-    feature_table : pd.DataFrame
-        feature DataFrame
-    """
-
-    results = []
-    sample_names = list(sample_names)
-    columns=["group_ID", "feature_ID", "m/z", "RT", "adduct", "is_isotope", "is_in_source_fragment", "Gaussian_similarity", "noise_score", 
-             "asymmetry_factor", "detection_rate", "detection_rate_gap_filled", "alignment_reference_file", "charge", "isotopes", "MS2_reference_file", "MS2", "matched_MS2", 
-             "search_mode", "annotation", "formula", "similarity", "matched_peak_number", "SMILES", "InChIKey"] + sample_names
-
-    for f in features:
-        if quant_method == "peak_height":
-            quant = list(f.peak_height_arr)
-        elif quant_method == "peak_area":
-            quant = list(f.peak_area_arr)
-        elif quant_method == "top_average":
-            quant = list(f.top_average_arr)
-        
-        results.append([f.feature_group_id, f.id, f.mz, f.rt, f.adduct_type, f.is_isotope, f.is_in_source_fragment, f.gaussian_similarity, f.noise_score,
-                        f.asymmetry_factor, f.detection_rate, f.detection_rate_gap_filled, f.reference_file, f.charge_state, f.isotope_signals, f.ms2_reference_file,
-                        f.ms2, f.matched_ms2, f.search_mode, f.annotation, f.formula, f.similarity, f.matched_peak_number, f.smiles, f.inchikey] + quant)
-        
-    feature_table = pd.DataFrame(results, columns=columns)
-    
-    return feature_table
+ELECTRON_MASS = 0.00054857990946

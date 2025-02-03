@@ -5,6 +5,7 @@
 # imports
 import numpy as np
 import pandas as pd
+import re
 import os
 from tqdm import tqdm
 from scipy.interpolate import interp1d
@@ -84,6 +85,7 @@ class AlignedFeature:
         self.smiles = None                          # SMILES
         self.inchikey = None                        # InChIKey
         self.matched_precursor_mz = None            # matched precursor m/z
+        self.matched_retention_time = None          # matched retention time
         self.matched_adduct_type = None             # matched adduct type
         self.matched_ms2 = None                     # matched ms2 spectra
 
@@ -107,7 +109,7 @@ def feature_alignment(path: str, params: Params):
     Returns
     -------
     features: list
-        A list of aligned features.
+        A list of AlignedFeature objects.
     """
 
     # STEP 1: preparation
@@ -121,7 +123,7 @@ def feature_alignment(path: str, params: Params):
         # remove those files from names
         names = [names[i] for i in range(len(names)) if params.sample_names[i] not in not_found_files]
         # remove those files from sample metadata
-        params.sample_metadata = params.sample_metadata[~params.sample_metadata['file_name'].isin(not_found_files)]
+        params.sample_metadata = params.sample_metadata[~params.sample_metadata['sample_name'].isin(not_found_files)]
     
     # find anchors for retention time correction
     if params.correct_rt:
@@ -129,8 +131,9 @@ def feature_alignment(path: str, params: Params):
         for n in names:
             df = pd.read_csv(n, sep="\t", low_memory=False)
             intensities.append(np.sum(df["peak_height"]))
-        anchor_selection_name = names[np.argmax(intensities)]
-        mz_ref, rt_ref = rt_anchor_selection(anchor_selection_name)
+        # use the file with median total intensity as the reference file
+        anchor_selection_name = names[np.argsort(intensities)[len(intensities)//2]]
+        mz_ref, rt_ref = rt_anchor_selection(anchor_selection_name, num=500)
         rt_cor_functions = {}
     
     # STEP 2: read individual feature tables and align features
@@ -146,14 +149,15 @@ def feature_alignment(path: str, params: Params):
         # sort current table by peak height from high to low
         current_table = current_table.sort_values(by="peak_height", ascending=False)
         current_table.index = range(len(current_table))
+        tmp_table = current_table[current_table["peak_height"] > params.ms1_abs_int_tol * 5]
 
         availible_features = np.ones(len(current_table), dtype=bool)
 
         # retention time correction
-        if params.correct_rt and params.sample_metadata['is_blank'][i] == False:
-            rt_arr = current_table["RT"].values
-            rt_arr, model = retention_time_correction(mz_ref, rt_ref, current_table["m/z"].values, rt_arr)
-            current_table["RT"] = rt_arr
+        if params.correct_rt:
+            _, model = retention_time_correction(mz_ref, rt_ref, tmp_table["m/z"].values, tmp_table["RT"].values, rt_tol=params.rt_tol_rt_correction)
+            if model is not None:
+                current_table["RT"] = model(current_table["RT"].values)
             rt_cor_functions[file_name] = model
 
         for f in features:
@@ -222,7 +226,7 @@ def feature_alignment(path: str, params: Params):
 
 def gap_filling(features, params: Params):
     """
-    A function to fill the gaps in the aligned feature table.
+    Fill the gaps for aligned features.
 
     Parameters
     ----------------------------------------------------------
@@ -275,7 +279,7 @@ def gap_filling(features, params: Params):
 
 def merge_features(features: list, params: Params):
     """
-    Clean features by merging the features with almost the same m/z and retention time.
+    Clean features by merging features with almost the same m/z and retention time.
 
     Parameters
     ----------
@@ -341,9 +345,101 @@ def merge_features(features: list, params: Params):
     return features_cleaned
 
 
+def convert_features_to_df(features, sample_names, quant_method="peak_height"):
+    """
+    Convert the aligned features to a DataFrame.
+
+    Parameters
+    ----------
+    features : list
+        list of features
+    sample_names : list
+        list of sample names
+    quant_method : str
+        quantification method, "peak_height", "peak_area" or "top_average"
+
+    Returns
+    -------
+    feature_table : pd.DataFrame
+        feature DataFrame
+    """
+
+    results = []
+    sample_names = list(sample_names)
+    columns=["group_ID", "feature_ID", "m/z", "RT", "adduct", "is_isotope", "is_in_source_fragment", "Gaussian_similarity", "noise_score", 
+             "asymmetry_factor", "detection_rate", "detection_rate_gap_filled", "alignment_reference_file", "charge", "isotopes", "MS2_reference_file", "MS2", "matched_MS2", 
+             "search_mode", "annotation", "formula", "similarity", "matched_peak_number", "SMILES", "InChIKey"] + sample_names
+
+    for f in features:
+        if quant_method == "peak_height":
+            quant = list(f.peak_height_arr)
+        elif quant_method == "peak_area":
+            quant = list(f.peak_area_arr)
+        elif quant_method == "top_average":
+            quant = list(f.top_average_arr)
+        
+        quant = [int(x) for x in quant]
+        
+        results.append([f.feature_group_id, f.id, f.mz, f.rt, f.adduct_type, f.is_isotope, f.is_in_source_fragment, f.gaussian_similarity, f.noise_score,
+                        f.asymmetry_factor, f.detection_rate, f.detection_rate_gap_filled, f.reference_file, f.charge_state, f.isotope_signals, f.ms2_reference_file,
+                        f.ms2, f.matched_ms2, f.search_mode, f.annotation, f.formula, f.similarity, f.matched_peak_number, f.smiles, f.inchikey] + quant)
+        
+    feature_table = pd.DataFrame(results, columns=columns)
+    
+    return feature_table
+
+
+def output_feature_to_msp(feature_table, output_path):
+    """
+    A function to output MS2 spectra to MSP format.
+
+    Parameters
+    ----------
+    feature_table : pandas.DataFrame
+        A DataFrame containing MS2 spectra.
+    output_path : str
+        The path to the output MSP file.
+    """
+    
+    # check the output path to make sure it is a .msp file and it esists
+    if not output_path.lower().endswith(".msp"):
+        raise ValueError("The output path must be a .msp file.")
+
+    with open(output_path, "w") as f:
+        for i in range(len(feature_table)):
+            f.write("ID: " + str(feature_table['feature_ID'][i]) + "\n")
+            if feature_table['MS2'][i] is None or feature_table['MS2'][i]!=feature_table['MS2'][i]:
+                f.write("NAME: Unknown\n")
+                f.write("PRECURSORMZ: " + str(feature_table['m/z'][i]) + "\n")
+                f.write("PRECURSORTYPE: " + str(feature_table['adduct'][i]) + "\n")
+                f.write("RETENTIONTIME: " + str(feature_table['RT'][i]) + "\n")
+                f.write("Num Peaks: " + "0\n")
+                f.write("\n")
+                continue
+
+            if feature_table['annotation'][i] is None:
+                name = "Unknown"
+            else:
+                name = str(feature_table['annotation'][i])
+
+            peaks = re.findall(r"\d+\.\d+", feature_table['MS2'][i])
+            f.write("NAME: " + name + "\n")
+            f.write("PRECURSORMZ: " + str(feature_table['m/z'][i]) + "\n")
+            f.write("PRECURSORTYPE: " + str(feature_table['adduct'][i]) + "\n")
+            f.write("RETENTIONTIME: " + str(feature_table['RT'][i]) + "\n")
+            f.write("SEARCHMODE: " + str(feature_table['search_mode'][i]) + "\n")
+            f.write("FORMULA: " + str(feature_table['formula'][i]) + "\n")
+            f.write("INCHIKEY: " + str(feature_table['InChIKey'][i]) + "\n")
+            f.write("SMILES: " + str(feature_table['SMILES'][i]) + "\n")
+            f.write("Num Peaks: " + str(int(len(peaks)/2)) + "\n")
+            for j in range(len(peaks)//2):
+                f.write(str(peaks[2*j]) + "\t" + str(peaks[2*j+1]) + "\n")
+            f.write("\n")
+
+
 def output_feature_table(feature_table, output_path):
     """
-    A function to output the aligned feature table.
+    Output the aligned feature table.
 
     Parameters
     ----------------------------------------------------------
@@ -364,7 +460,7 @@ def output_feature_table(feature_table, output_path):
     feature_table.to_csv(output_path, index=False, sep="\t")
 
 
-def retention_time_correction(mz_ref, rt_ref, mz_arr, rt_arr, mz_tol=0.01, rt_tol=2.0, mode='linear_interpolation', 
+def retention_time_correction(mz_ref, rt_ref, mz_arr, rt_arr, mz_tol=0.01, rt_tol=0.5, mode='linear_interpolation', 
                               rt_max=None):
     """
     To correct retention times for feature alignment.
@@ -404,15 +500,13 @@ def retention_time_correction(mz_ref, rt_ref, mz_arr, rt_arr, mz_tol=0.01, rt_to
         The model for retention time correction.
     """
 
-    mz_matched = []
     rt_matched = []
     idx_matched = []
 
     for i in range(len(mz_ref)):
         v = np.logical_and(np.abs(mz_arr - mz_ref[i]) < mz_tol, np.abs(rt_arr - rt_ref[i]) < rt_tol)
         v = np.where(v)[0]
-        if len(v) > 0:
-            mz_matched.append(mz_arr[v[0]])
+        if len(v) == 1:
             rt_matched.append(rt_arr[v[0]])
             idx_matched.append(i)
     rt_ref = rt_ref[idx_matched]
@@ -422,21 +516,21 @@ def retention_time_correction(mz_ref, rt_ref, mz_arr, rt_arr, mz_tol=0.01, rt_to
     
     # remove outliers
     v = rt_ref - np.array(rt_matched)
-    z = zscore(v)
-    outliers = np.where(np.logical_and(np.abs(z) > 1, np.abs(v) > 0.05))[0]
-    if len(outliers) > 0:
-        rt_ref = np.delete(rt_ref, outliers)
-        rt_matched = np.delete(rt_matched, outliers)
+    k = np.abs(v - np.mean(v)) < np.std(v)
+    rt_ref = rt_ref[k]
+    rt_matched = np.array(rt_matched)[k]
 
     if len(rt_matched) < 5:
         return rt_arr, None
+    
+    x = [0]
+    y = [0]
+    for i in range(len(rt_matched)):
+        if rt_matched[i] - x[-1] > 0.1:
+            x.append(rt_matched[i])
+            y.append(rt_ref[i])
 
-    # add zero and rt_max to the beginning and the end
-    if rt_max is None:
-        rt_max = np.max(rt_arr) + 0.1
-    rt_matched = np.concatenate(([0], rt_matched, [rt_max]))
-    rt_ref = np.concatenate(([0], rt_ref, [rt_max]))
-    f = interp1d(rt_matched, rt_ref, fill_value='extrapolate')
+    f = interp1d(x, y, fill_value='extrapolate')
     
     return f(rt_arr), f
 
@@ -446,8 +540,6 @@ def rt_anchor_selection(data_path, num=50, noise_score_tol=0.1, mz_tol=0.01):
     Retention time anchors have unique m/z values and low noise scores. From all candidate features, 
     the top *num* features with the highest peak heights are selected as anchors.
 
-    The number of anchors
-
     Parameters
     ----------
     data_path : str
@@ -456,6 +548,8 @@ def rt_anchor_selection(data_path, num=50, noise_score_tol=0.1, mz_tol=0.01):
         The number of anchors to be selected.
     noise_tol : float
         The noise level for the anchors. Suggestions: 0.3 or lower.
+    mz_tol : float
+        The m/z tolerance for selecting anchors.
 
     Returns
     -------
@@ -488,9 +582,9 @@ Internal Functions
 ------------------------------------------------------------------------------------------------------------------------
 """
 
-def _split_to_train_test(array, interval=0.1):
+def split_to_train_test(array, interval=0.1):
     """
-    To split the selected anchors into training and testing sets.
+    Split the selected anchors into training and testing sets.
 
     Parameters
     ----------

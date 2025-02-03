@@ -36,7 +36,7 @@ class Params:
         self.project_file_dir = None        # directory for the project files, string
         self.normalization_dir = None       # directory for the normalization output, string
         self.statistics_dir = None          # directory for the statistical analysis output, string
-        self.problematic_files = None       # problematic files, dictionary: {file_name: error_message}
+        self.problematic_files = {}         # problematic files, dictionary: {file_name: error_message}
 
         # raw data reading and cleaning
         self.file_name = None               # file name of the raw data, string
@@ -69,27 +69,31 @@ class Params:
         self.group_features_single_file = False     # whether to group features in a single file, default is False
         self.scan_scan_cor_tol = 0.7                # scan-to-scan correlation tolerance for feature grouping, default is 0.7
         self.mz_tol_feature_grouping = 0.015        # m/z tolerance for feature grouping, default is 0.01
-        self.rt_tol_feature_grouping = 0.1          # RT tolerance for feature grouping, default is 0.2
+        self.rt_tol_feature_grouping = 0.1          # RT tolerance for feature grouping, default is 0.1
         self.valid_charge_states = [1]              # valid charge states for feature grouping, list of integers
 
         # feature alignment
         self.mz_tol_alignment = 0.01                # m/z tolerance for alignment, default is 0.01
         self.rt_tol_alignment = 0.2                 # RT tolerance for alignment, default is 0.2
+        self.rt_tol_rt_correction = 0.5             # Expected maximum RT shift for RT correction, default is 0.5 minutes
         self.correct_rt = True                      # whether to perform RT correction, default is True
         self.scan_number_cutoff = 5                 # feature with non-zero scan number greater than the cutoff will be aligned, default is 5
         self.detection_rate_cutoff = 0.1            # features detected need to be >rate*(qc+sample), default rate is 0.1
         self.merge_features = True                  # whether to merge features with almost the same m/z and RT, default is True
-        self.mz_tol_merge_features = 0.01           # m/z tolerance for merging features, default is 0.01
+        self.mz_tol_merge_features = 0.012          # m/z tolerance for merging features, default is 0.012
         self.rt_tol_merge_features = 0.05           # RT tolerance for merging features, default is 0.05
         self.group_features_after_alignment = True  # whether to group features after alignment, default is False
         self.fill_gaps = True                       # whether to fill the gaps in the aligned features, default is True
-        self.gap_filling_method = "local_maximum"   # method for gap filling, default is "local_maximum", string
+        self.gap_filling_method = "local_maximum"   # method for gap filling, default is "  local_maximum", string
         self.gap_filling_rt_window = 0.05           # RT window for finding local maximum, default is 0.05 minutes
+        self.isotope_rel_int_limit = 1.0            # intensity upper limit of isotopes cannot exceed the base peak intensity * isotope_rel_int_limit, default is 1.5
 
         # feature annotation
         self.ms2_library_path = None        # path to the MS2 library (.msp or .pickle), character string
+        self.fuzzy_search = False           # whether to perform fuzzy search, default is False
+        self.consider_rt = False            # whether to consider RT in MS2 matching, default is False.
+        self.rt_tol_annotation = 0.2        # RT tolerance for MS2 annotation, default is 0.2
         self.ms2_sim_tol = 0.7              # MS2 similarity tolerance, default is 0.7
-        self.fuzzy_search = True            # whether to perform fuzzy search, default is True
         
         # normalization
         self.sample_normalization = False   # whether to normalize the data based on total sample amount/concentration, default is False
@@ -103,6 +107,7 @@ class Params:
         # visualization
         self.plot_bpc = False               # whether to plot base peak chromatograms
         self.plot_ms2 = False               # whether to plot mirror plots for MS2 matching
+        self.plot_normalization = False     # whether to plot the normalization results
 
         # classifier building
         self.by_group_name = None           # only used for building classification model: group name for classifier building, string
@@ -136,7 +141,6 @@ class Params:
                     value = True
                 elif value.lower() == "false" or value.lower() == "no":
                     value = False
-
             setattr(self, df.iloc[i, 0], value)
 
         # check if the parameters are correct
@@ -257,6 +261,7 @@ class Params:
                                  (f.lower().endswith(".mzml") or f.lower().endswith(".mzxml"))]
             self.sample_abs_paths = [os.path.join(self.sample_dir, f) for f in self.sample_names]
             self.sample_names = [f.split(".")[0] for f in self.sample_names]
+            self.sample_metadata = pd.DataFrame({'sample_name': self.sample_names, 'is_qc': False, 'is_blank': False})
 
         # STEP 6: set output
         self.output_single_file = True      # output the processed individual files to a txt file
@@ -296,6 +301,7 @@ class Params:
                 setattr(self, key, PARAMETER_DEFAULT[key])
         if not os.path.exists(str(self.ms2_library_path)):
             self.ms2_library_path = None
+        self.batch_size = int(self.batch_size)
 
 
     def output_parameters(self, path, format="json"):
@@ -337,9 +343,11 @@ def find_ms_info(file_name):
     Returns
     -------
     ms_type : str
-        The type of MS.
+        The type of MS, "orbitrap", "qtof", "tripletof" or "others".
     ion_mode : str
-        The ion mode.
+        The ion mode, "positive" or "negative".
+    centroid : bool
+        Whether the data is centroid data.
     """
 
     ms_type = None
