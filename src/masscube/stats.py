@@ -1,3 +1,5 @@
+# Author: Huaxu Yu
+
 # A module for statistical analysis
 # imports
 import umap.umap_ as umap
