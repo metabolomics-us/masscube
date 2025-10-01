@@ -343,8 +343,8 @@ def scan_to_scan_correlation(feature_a, feature_b):
     """
 
     # find the common scans in the two rois
-    common_idx_a = np.nonzero(np.in1d(feature_a.scan_idx_seq, feature_b.scan_idx_seq))[0]
-    common_idx_b = np.nonzero(np.in1d(feature_b.scan_idx_seq, feature_a.scan_idx_seq))[0]
+    common_idx_a = np.nonzero(np.isin(feature_a.scan_idx_seq, feature_b.scan_idx_seq))[0]
+    common_idx_b = np.nonzero(np.isin(feature_b.scan_idx_seq, feature_a.scan_idx_seq))[0]
 
     # if the number of common scans is less than 5, return 1
     if len(common_idx_a) < 5:

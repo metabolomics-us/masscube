@@ -261,7 +261,7 @@ def gap_filling(features, params: Params):
                         eic_time_arr, eic_signals, _ = d.get_eic_data(f.mz, f.rt, params.mz_tol_alignment, params.gap_filling_rt_window)
                         if len(eic_signals) > 0:
                             f.peak_height_arr[i] = np.max(eic_signals[:, 1])
-                            f.peak_area_arr[i] = int(np.trapz(y=eic_signals[:, 1], x=eic_time_arr))
+                            f.peak_area_arr[i] = int(np.trapezoid(y=eic_signals[:, 1], x=eic_time_arr))
                             f.top_average_arr[i] = np.mean(np.sort(eic_signals[:, 1])[-3:])
 
     # calculate the detection rate after gap filling (blank samples are not included)

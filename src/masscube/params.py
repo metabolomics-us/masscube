@@ -185,7 +185,7 @@ class Params:
     
         # STEP 1: check if the project directory exists
         if not os.path.exists(self.project_dir):
-            raise ValueError("The project directory does not exist. Please create the directory first.")
+            raise ValueError(f"The project directory does not exist. Please create the directory first. Path is: {self.project_dir}")
         
         self.sample_dir = os.path.join(self.project_dir, "data")
         self.single_file_dir = os.path.join(self.project_dir, "single_files")

@@ -1,6 +1,7 @@
 LICENSE
 README.md
 pyproject.toml
+src/__init__.py
 src/masscube/__init__.py
 src/masscube/alignment.py
 src/masscube/annotation.py
