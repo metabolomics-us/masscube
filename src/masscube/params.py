@@ -9,7 +9,7 @@ import json
 from importlib.metadata import version
 import numpy as np
 
-from .utils_functions import get_start_time
+from .utils_functions import get_start_time, label_batch_id
 
 
 class Params:
@@ -24,8 +24,6 @@ class Params:
         """
 
         # project
-        self.sample_names = None            # sample names without extension, list of strings
-        self.sample_abs_paths = None        # absolute paths of the raw MS data, list of strings
         self.sample_metadata = None         # sample metadata, pandas DataFrame
         self.project_dir = None             # project directory, string
         self.sample_dir = None              # directory for the raw MS data, string
@@ -45,7 +43,6 @@ class Params:
         self.ms_type = None                 # type of MS, "orbitrap", "qtof", "tripletof" or "others", string
         self.is_centroid = True             # whether the raw data is centroid data, boolean
         self.file_format = None             # file type in lower case, 'mzml', 'mzxml', 'mzjson' or 'mzjson.gz', string
-        self.time = None                    # when the data file was acquired, datetime.datetime object
         self.scan_time_unit = "minute"      # time unit of the scan time, "minute" or "second", string
         self.mz_lower_limit = 0.0           # lower limit of m/z in Da, float
         self.mz_upper_limit = 100000.0      # upper limit of m/z in Da, float
@@ -61,7 +58,7 @@ class Params:
         # feature detection
         self.mz_tol_ms1 = 0.01              # m/z tolerance for MS1, default is 0.01
         self.mz_tol_ms2 = 0.015             # m/z tolerance for MS2, default is 0.015
-        self.feature_gap_tol = 30           # gap tolerance within a feature, default is 30 (i.e. 30 consecutive scans without signal), integer
+        self.feature_gap_tol = 10           # gap tolerance within a feature, default is 10 (i.e. 10 consecutive scans without signal), integer
         self.batch_size = 100               # batch size for parallel processing, default is 100, integer
         self.percent_cpu_to_use = 0.8       # percentage of CPU to use, default is 0.8, float
         
@@ -80,13 +77,13 @@ class Params:
         self.scan_number_cutoff = 5                 # feature with non-zero scan number greater than the cutoff will be aligned, default is 5
         self.detection_rate_cutoff = 0.1            # features detected need to be >rate*(qc+sample), default rate is 0.1
         self.merge_features = True                  # whether to merge features with almost the same m/z and RT, default is True
-        self.mz_tol_merge_features = 0.012          # m/z tolerance for merging features, default is 0.012
-        self.rt_tol_merge_features = 0.05           # RT tolerance for merging features, default is 0.05
+        self.mz_tol_merge_features = 0.01           # m/z tolerance for merging features, default is 0.01
+        self.rt_tol_merge_features = 0.02           # RT tolerance for merging features, default is 0.02
         self.group_features_after_alignment = True  # whether to group features after alignment, default is False
         self.fill_gaps = True                       # whether to fill the gaps in the aligned features, default is True
         self.gap_filling_method = "local_maximum"   # method for gap filling, default is "  local_maximum", string
         self.gap_filling_rt_window = 0.05           # RT window for finding local maximum, default is 0.05 minutes
-        self.isotope_rel_int_limit = 1.0            # intensity upper limit of isotopes cannot exceed the base peak intensity * isotope_rel_int_limit, default is 1.5
+        self.isotope_rel_int_limit = 1.5            # intensity upper limit of isotopes cannot exceed the base peak intensity * isotope_rel_int_limit, default is 1.5
 
         # feature annotation
         self.ms2_library_path = None        # path to the MS2 library (.msp or .pickle), character string
@@ -94,6 +91,7 @@ class Params:
         self.consider_rt = False            # whether to consider RT in MS2 matching, default is False.
         self.rt_tol_annotation = 0.2        # RT tolerance for MS2 annotation, default is 0.2
         self.ms2_sim_tol = 0.7              # MS2 similarity tolerance, default is 0.7
+        self.spectral_similarity_method = "unweighted_entropy"  # method for spectral similarity calculation
         
         # normalization
         self.sample_normalization = False   # whether to normalize the data based on total sample amount/concentration, default is False
@@ -158,8 +156,8 @@ class Params:
         """
 
         df = pd.read_csv(path)
-        self.sample_names = list(df.iloc[:, 0])
         df.columns = [col.lower() if col.lower() in ['is_qc', 'is_blank'] else col for col in df.columns]
+        # df.columns[0] = 'sample_name'
 
         if 'is_qc' in df.columns and type(df['is_qc'][0]) == str:
             df['is_qc'] = df['is_qc'].apply(lambda x: True if x.lower() == 'yes' else False)
@@ -173,6 +171,9 @@ class Params:
         # move all qc samples to the front and all blank samples to the end
         df = df.sort_values(by=['is_qc', 'is_blank'], ascending=[False, True])
         df = df.reset_index(drop=True)
+
+        df['VALID'] = True
+        df['ABSOLUTE_PATH'] = None
         
         self.sample_metadata = df
 
@@ -197,7 +198,9 @@ class Params:
         
         # STEP 2: check if the required files are prepared
         #         three items are required: raw MS data, sample table and parameter file
-        if not os.path.exists(self.sample_dir) or len(os.listdir(self.sample_dir)) == 0:
+        sample_files = [f for f in os.listdir(self.sample_dir) if not f.startswith(".") and 
+                        (f.lower().endswith(".mzml") or f.lower().endswith(".mzxml"))]
+        if not os.path.exists(self.sample_dir) or len(sample_files) == 0:
             raise ValueError("No raw MS data is found in the project directory.")
         if not os.path.exists(os.path.join(self.project_dir, "sample_table.csv")):
             print("No sample table is found in the project directory. Normalization and statistical analysis will NOT be performed.")
@@ -209,16 +212,9 @@ class Params:
             print("To perform feature annotation, please specify the path of MS/MS library in the parameter file.")
 
         # STEP 3: create the output directories if not exist
-        if not os.path.exists(self.single_file_dir):
-            os.makedirs(self.single_file_dir)
-        if not os.path.exists(self.tmp_file_dir):
-            os.makedirs(self.tmp_file_dir)
-        if not os.path.exists(self.ms2_matching_dir):
-            os.makedirs(self.ms2_matching_dir)
-        if not os.path.exists(self.bpc_dir):
-            os.makedirs(self.bpc_dir)
-        if not os.path.exists(self.project_file_dir):
-            os.makedirs(self.project_file_dir)
+        for d in [self.single_file_dir, self.tmp_file_dir, self.ms2_matching_dir,
+                self.bpc_dir, self.project_file_dir, self.statistics_dir, self.normalization_dir]:
+            os.makedirs(d, exist_ok=True)
         
         # STEP 4: read the parameters from csv file or use default values
         if os.path.exists(os.path.join(self.project_dir, "parameters.csv")):
@@ -226,42 +222,43 @@ class Params:
         else:
             print("Using default parameters...")
             # determine the type of MS and ion mode
-            file_names = os.listdir(self.sample_dir)
-            file_names = [f for f in file_names if f.lower().endswith(".mzml") or f.lower().endswith(".mzxml")]
-            file_name = os.path.join(self.sample_dir, file_names[0])
+            file_name = os.path.join(self.sample_dir, sample_files[0])
             ms_type, ion_mode, _ = find_ms_info(file_name)
             self.set_default(ms_type, ion_mode)
             self.plot_bpc = True
-        
-        if not os.path.exists(self.statistics_dir) and self.run_statistics:
-            os.makedirs(self.statistics_dir)
-        if not os.path.exists(self.normalization_dir) and (self.sample_normalization or self.signal_normalization):
-            os.makedirs(self.normalization_dir)
 
         # STEP 5: read the sample names and sample metadata from the sample table
         if os.path.exists(os.path.join(self.project_dir, "sample_table.csv")):
             self.read_sample_metadata(os.path.join(self.project_dir, "sample_table.csv"))
-            self.sample_names = list(self.sample_metadata.iloc[:, 0])
-            available_files = [f for f in os.listdir(self.sample_dir) if not f.startswith(".") and 
-                               (f.lower().endswith(".mzml") or f.lower().endswith(".mzxml"))]
             # find the absolute paths of the raw MS data in order
-            self.sample_abs_paths = [None] * len(self.sample_names)
-            for i, name in enumerate(self.sample_names):
-                for f in available_files:
-                    if name in f:
-                        self.sample_abs_paths[i] = os.path.join(self.sample_dir, f)
-                        break
-            # find the start time of the raw MS data
-            self.sample_metadata['time'] = [get_start_time(path) for path in self.sample_abs_paths]
-            self.sample_metadata['analytical_order'] = 0
-            for rank, idx in enumerate(np.argsort(self.sample_metadata['time'])):
-                self.sample_metadata.loc[idx, 'analytical_order'] = rank + 1
+            self._check_raw_files_in_data_dir()
         else:
-            self.sample_names = [f for f in os.listdir(self.sample_dir) if not f.startswith(".") and 
-                                 (f.lower().endswith(".mzml") or f.lower().endswith(".mzxml"))]
-            self.sample_abs_paths = [os.path.join(self.sample_dir, f) for f in self.sample_names]
-            self.sample_names = [f.split(".")[0] for f in self.sample_names]
-            self.sample_metadata = pd.DataFrame({'sample_name': self.sample_names, 'is_qc': False, 'is_blank': False})
+            names = [f.split(".")[0] for f in sample_files]
+            self.sample_metadata = pd.DataFrame({'sample_name': names, 'is_qc': False, 'is_blank': False})
+            self._check_raw_files_in_data_dir()
+        
+        # if no valid files are found, raise an error
+        if np.sum(self.sample_metadata['VALID']) == 0:
+            raise ValueError("No valid raw MS data is found in the project directory. Please check the sample table.")
+
+        # find the start time of the raw MS data
+        self.sample_metadata['time'] = [get_start_time(path) for path in self.sample_metadata['ABSOLUTE_PATH']]
+        self.sample_metadata['VALID'] = self.sample_metadata['time'].notna()
+        
+        # remove the invalid files
+        self.sample_metadata = self.sample_metadata[self.sample_metadata['VALID'] == True]
+        
+        # sort by time
+        self.sample_metadata = self.sample_metadata.sort_values(by=['time'])
+        self.sample_metadata['analytical_order'] = np.arange(len(self.sample_metadata))
+        
+        # recongnize the batch ID for normalization purpose
+        self.sample_metadata = label_batch_id(self.sample_metadata)
+
+        # reset the index
+        self.sample_metadata.index = np.arange(len(self.sample_metadata))
+        
+        self.sample_metadata.to_csv(os.path.join(self.project_file_dir, "sample_table_with_time.csv"), index=False)
 
         # STEP 6: set output
         self.output_single_file = True      # output the processed individual files to a txt file
@@ -307,7 +304,6 @@ class Params:
     def output_parameters(self, path, format="json"):
         """
         Output the parameters to a file.
-        ---------------------------------
 
         Parameters
         ----------
@@ -329,6 +325,23 @@ class Params:
                 json.dump(parameters, f)
         else:
             raise ValueError("The output format is not supported.")
+    
+
+    def _check_raw_files_in_data_dir(self):
+        """
+        Check if the raw files are in the data directory.
+        """
+    
+        folder_files = {os.path.splitext(f)[0]: f for f in os.listdir(self.sample_dir) if not f.startswith(".") and
+                        (f.lower().endswith(".mzml") or f.lower().endswith(".mzxml"))}
+
+        for i in range(len(self.sample_metadata)):
+            n = self.sample_metadata.iloc[i, 0]
+            if n not in folder_files:
+                self.sample_metadata.loc[i, "VALID"] = False
+            else:
+                self.sample_metadata.loc[i, "VALID"] = True
+                self.sample_metadata.loc[i, "ABSOLUTE_PATH"] = os.path.join(self.sample_dir, folder_files[n])
 
 
 def find_ms_info(file_name):
@@ -356,12 +369,8 @@ def find_ms_info(file_name):
 
     # for mzml and mzxml
     if file_name.lower().endswith('.mzml') or file_name.lower().endswith('.mzxml'):
-        text = ""
         with open(file_name, 'r') as f:
-            for i, line in enumerate(f):
-                text += line
-                if i > 200:
-                    break
+            text = ''.join([next(f) for _ in range(200)])
         text = text.lower()
         if 'orbitrap' in text or 'q exactive' in text:
             ms_type = 'orbitrap'

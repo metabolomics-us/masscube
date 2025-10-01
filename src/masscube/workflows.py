@@ -5,16 +5,17 @@
 # Import modules
 import os
 import multiprocessing
+from joblib import Parallel, delayed
+from tqdm import tqdm
 import pickle
 from copy import deepcopy
 import pandas as pd
 import numpy as np
 from importlib.metadata import version
-from scipy.stats import zscore
 import time
 
 from .raw_data_utils import read_raw_file_to_obj
-from .params import Params
+from .params import Params, find_ms_info
 from .feature_grouping import group_features_after_alignment, group_features_single_file
 from .alignment import feature_alignment, output_feature_table, convert_features_to_df, output_feature_to_msp
 from .annotation import annotate_aligned_features, annotate_features, feature_annotation_mzrt
@@ -26,7 +27,7 @@ from .utils_functions import convert_signals_to_string
 
 # 1. Untargeted feature detection for a single file
 def process_single_file(file_name, params=None, segment_feature=True, group_features=False, evaluate_peak_shape=True,
-                        annotate_ms2=False, ms2_library_path=None, output_dir=None):
+                        annotate_ms2=False, ms2_library_path=None, output_dir=None, return_data=True):
     """
     Untargeted data processing for a single file (mzML, mzXML, mzjson or compressed mzjson).
 
@@ -49,6 +50,8 @@ def process_single_file(file_name, params=None, segment_feature=True, group_feat
         Another way to specify the MS2 library path.
     output_dir : str
         The output directory for the single file. If None, the output is saved to the same directory as the raw file.
+    return_data : bool
+        Whether to return the processed data as MSData object or not. Default is True.
 
     Returns
     -------
@@ -58,7 +61,18 @@ def process_single_file(file_name, params=None, segment_feature=True, group_feat
 
     try:
         # STEP 1. data reading, parsing, and parameter preparation
+        if params is None:
+            params = Params()
+            ms_type, ion_mode, _ = find_ms_info(file_name)
+            params.set_default(ms_type, ion_mode)
+
         d = read_raw_file_to_obj(file_name, params=params)
+
+        # check if the MS1 data is valid (no MS1 data found when intensity tolerance is too high)
+        if len(d.ms1_idx) == 0:
+            print("No valid MS1 data were found in: " + file_name + ". Please check the file and MS1 intensity tolerance.")
+            return d
+
         # check if the file is centroided
         if not d.params.is_centroid:
             print("File: " + file_name + " is not centroided and skipped.")
@@ -66,9 +80,11 @@ def process_single_file(file_name, params=None, segment_feature=True, group_feat
         # set ms2 library path
         if ms2_library_path is not None:
             d.params.ms2_library_path = ms2_library_path
+        
 
         # STEP 2. feature detection and segmentation
         d.detect_features()
+
         if segment_feature:
             d.segment_features()
 
@@ -89,7 +105,7 @@ def process_single_file(file_name, params=None, segment_feature=True, group_feat
         if group_features:
             group_features_single_file(d)
 
-        # STEP 6. Visualization and output
+        # STEP 6. visualization and output
         if d.params.plot_bpc and d.params.bpc_dir is not None:
             d.plot_bpc(output_dir=os.path.join(d.params.bpc_dir, d.params.file_name + "_bpc.png"))
         
@@ -103,7 +119,10 @@ def process_single_file(file_name, params=None, segment_feature=True, group_feat
         if d.params.tmp_file_dir is not None:
             d.convert_to_mzpkl()
 
-        return d
+        if return_data:
+            return d
+        else:
+            return None
     
     except:
         print("Error occurred during processing file: " + file_name)
@@ -167,24 +186,37 @@ def untargeted_metabolomics_workflow(path=None, return_results=False, only_proce
     # STEP 2. Process individual files
     print("Step 2: Processing individual files for feature detection...")
     processed_files = [f.split(".")[0] for f in os.listdir(params.single_file_dir) if f.lower().endswith(".txt")]
-    to_be_processed = []
-    for i, f in enumerate(params.sample_names):
-        if f not in processed_files:
-            to_be_processed.append(params.sample_abs_paths[i])
-    print("\t{} files to process out of {} files.".format(len(to_be_processed), len(params.sample_abs_paths)))
+    to_be_processed = [
+        params.sample_metadata.loc[i, 'ABSOLUTE_PATH']
+        for i in range(len(params.sample_metadata))
+        if params.sample_metadata.iloc[i, 0] not in processed_files
+    ]
+    print(f"\t{len(to_be_processed)} files to process out of {len(params.sample_metadata)} files.")
     
     workers = int(multiprocessing.cpu_count() * params.percent_cpu_to_use)
     print("\tA total of {} CPU cores are detected, {} cores are used.".format(multiprocessing.cpu_count(), workers))
-    for i in range(0, len(to_be_processed), params.batch_size):
-        if len(to_be_processed) - i < params.batch_size:
-            print("\tProcessing files from " + str(i) + " to " + str(len(to_be_processed)))
-        else:
-            print("\tProcessing files from " + str(i) + " to " + str(i+params.batch_size))
-        p = multiprocessing.Pool(workers)
-        p.starmap(process_single_file, [(f, params) for f in to_be_processed[i:i+params.batch_size]])
-        p.close()
-        p.join()
-        
+
+    import math
+    import gc
+    n_files = len(to_be_processed)
+    n_batches = math.ceil(n_files / params.batch_size)
+
+    for b in range(n_batches):
+        start = b * params.batch_size
+        end = min(start + params.batch_size, n_files)
+        batch = to_be_processed[start:end]
+
+        print(f"\nProcessing batch {b+1}/{n_batches} ({len(batch)} files)")
+
+        Parallel(n_jobs=workers, backend="loky")(
+            delayed(process_single_file)(f, params, return_data=False)
+            for f in tqdm(batch, desc=f"Batch {b+1}", unit="file")
+        )
+
+        # Clean up memory
+        gc.collect()
+
+
     metadata[2]["status"] = "completed"
     print("\tIndividual file processing is completed.")
     print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -193,18 +225,20 @@ def untargeted_metabolomics_workflow(path=None, return_results=False, only_proce
         return None
     
     # STEP 3. Feature alignment
-    print("Step 3: Aligning features...")
     if not os.path.exists(params.project_dir + "/aligned_feature_table.txt"):
-
+        print("Step 3: Aligning features...")
         features = feature_alignment(params.single_file_dir, params)
         metadata[3]["status"] = "completed"
         print("\tFeature alignment is completed.")
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
-        feature_table = convert_features_to_df(features=features, sample_names=params.sample_names, quant_method=params.quant_method)
+        feature_table = convert_features_to_df(features=features, sample_names=params.sample_metadata.iloc[:,0], quant_method=params.quant_method)
         # output feature table to a txt file
         output_path = os.path.join(params.project_file_dir, "aligned_feature_table_before_annotation.txt")
         output_feature_table(feature_table, output_path)
+        # output features as pickle file to the project directory
+        with open(os.path.join(params.project_file_dir, "aligned_features.pkl"), "wb") as f:
+            pickle.dump(features, f)
         
     # STEP 4. Feature annotation
         print("Step 4: Annotating features...")
@@ -229,21 +263,25 @@ def untargeted_metabolomics_workflow(path=None, return_results=False, only_proce
         print("\tFeature grouping is completed.")
         metadata[4]["status"] = "completed"
 
-        feature_table = convert_features_to_df(features=features, sample_names=params.sample_names, quant_method=params.quant_method)
+        feature_table = convert_features_to_df(features=features, sample_names=params.sample_metadata.iloc[:,0], quant_method=params.quant_method)
         # output feature table to a txt file
         output_path = os.path.join(params.project_dir, "aligned_feature_table.txt")
         output_feature_table(feature_table, output_path)
         # output the acquired MS2 spectra to a MSP file (designed for MassWiki)
         output_path = os.path.join(params.project_file_dir, "features.msp")
         output_feature_to_msp(feature_table, output_path)
+        # output features as pickle file to the project directory
+        with open(os.path.join(params.project_file_dir, "aligned_features.pkl"), "wb") as f:
+            pickle.dump(features, f)
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
     else:
+        print("Step 3: Feature alignment is skipped. Using the existing aligned feature table.")
+        print("Step 4: Feature annotation is skipped. Using the existing aligned feature table.")
         feature_table = pd.read_csv(params.project_dir + "/aligned_feature_table.txt", sep="\t", low_memory=False)
 
     # STEP 5. signal normalization
     if params.signal_normalization:
         print("Step 5: Running signal normalization...")
-        print(params.plot_normalization)
         if params.plot_normalization:
             feature_table = signal_normalization(feature_table, params.sample_metadata, params.signal_norm_method, output_plot_path=params.normalization_dir)
         else:
@@ -252,7 +290,7 @@ def untargeted_metabolomics_workflow(path=None, return_results=False, only_proce
         print("\tMS signal drift normalization is completed.")
     else:
         metadata[5]["status"] = "skipped"
-        print("Step 6: MS signal drift normalization is skipped.")
+        print("Step 5: MS signal drift normalization is skipped.")
     print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
     # STEP 6. sample normalization
@@ -302,7 +340,7 @@ def untargeted_metabolomics_workflow(path=None, return_results=False, only_proce
 
 
 # 3. Evaluate the data quality of the raw files
-def run_evaluation(path=None, zscore_threshold=-2):
+def run_evaluation(path=None):
     """
     Evaluate the run and report the problematic files.
 
@@ -337,10 +375,10 @@ def run_evaluation(path=None, zscore_threshold=-2):
         df = pd.read_csv(os.path.join(txt_path, txt_files[i]), sep="\t", low_memory=False)
         int_array[i] = np.max(df['peak_height'].values)
         
-    z = zscore(int_array)
-    idx = np.where(z < zscore_threshold)[0]
+    v = int_array < np.median(int_array) / 3
 
-    problematic_files = [txt_files[i].split(".")[0] for i in idx]
+    problematic_files = [txt_files[i].split(".")[0] for i in range(len(txt_files)) if v[i]]
+    problematic_files = [f for f in problematic_files if f not in blank_samples]
     
     # output the names of problematic files
     if len(problematic_files) > 0:

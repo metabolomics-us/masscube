@@ -10,6 +10,7 @@ from scipy.stats import ttest_ind, f_oneway
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import random
 
 from .visualization import plot_pca
@@ -193,7 +194,7 @@ def umap_analysis(feature_table, params):
     df = df[(~df['is_qc']) & (~df['is_blank'])]
     n = df.iloc[:, 0].values
     data_arr = feature_table[n].values  # samples in columns and features in rows
-    keys = [i for i in df.columns[1:] if i not in ['is_qc', 'is_blank', 'analytical_order', 'time']]
+    keys = [i for i in df.columns[1:] if i not in PROJECT_KEYS]
 
     # UMAP analysis
     data_arr = data_arr.T
@@ -218,7 +219,8 @@ def umap_analysis(feature_table, params):
         # plot the UMAP
         plt.figure(figsize=(10, 10))
         plt.rcParams['font.size'] = 20
-        plt.rcParams['font.family'] = 'Arial'
+        if 'Arial' in [f.name for f in fm.fontManager.ttflist]:
+            plt.rcParams['font.family'] = 'Arial'
         # remove frame, x and y axis
         plt.box(False)
         plt.xticks([])
@@ -268,3 +270,4 @@ def generate_random_color(num):
 
 
 COLORS = ["#FF5050", "#0078F0", "#00B050", "#FFC000", "#7030A0", "#FF00FF", "#00B0F0", "#FF0000", "#00FF00", "#0000FF"]
+PROJECT_KEYS = ['is_qc', 'is_blank', 'analytical_order', 'time', 'ABSOLUTE_PATH', 'VALID', 'batch_id', 'SINGLE_FILE_PATH']
